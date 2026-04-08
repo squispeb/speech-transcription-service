@@ -1,6 +1,8 @@
 from contextlib import asynccontextmanager
+import logging
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from time import perf_counter
 
 from fastapi import Depends, FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import JSONResponse
@@ -18,6 +20,9 @@ from .schemas import (
     TranscribeAudioResponse,
     TranscribeAudioSuccess,
 )
+
+
+logger = logging.getLogger("uvicorn.error")
 
 
 def create_app(
@@ -75,6 +80,8 @@ def create_app(
         source: str | None = Form(None),
         runtime: TranscriptionRuntime = Depends(get_runtime),
     ) -> TranscribeAudioSuccess:
+        request_started_at = perf_counter()
+
         try:
             form_data = TranscribeAudioForm(languageHint=languageHint, source=source)
         except ValidationError as exc:
@@ -107,6 +114,16 @@ def create_app(
                 )
 
             result = await runtime.transcribe(normalized_path, form_data.languageHint)
+
+        request_duration_ms = (perf_counter() - request_started_at) * 1000
+        logger.info(
+            "transcribe_request_completed source=%s language_hint=%s audio_duration_s=%.2f final_language=%s request_duration_ms=%.2f",
+            form_data.source or "unknown",
+            form_data.languageHint,
+            duration_seconds,
+            result.language,
+            request_duration_ms,
+        )
 
         return TranscribeAudioSuccess(
             ok=True, transcript=result.transcript, language=result.language

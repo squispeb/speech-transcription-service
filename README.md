@@ -49,6 +49,12 @@ uv run uvicorn app.main:create_app --factory --host 0.0.0.0 --port 8000
 - `GET /health/ready`
 - `POST /transcribe`
 
+## Observability
+
+- service startup logs the loaded ASR and LangID models
+- each transcription logs LangID label, confidence, margin, final language source, and ASR/LangID timing
+- each request logs normalized audio duration and total request latency
+
 ## Tests
 
 ```bash
