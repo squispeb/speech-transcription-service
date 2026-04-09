@@ -60,3 +60,7 @@ uv run uvicorn app.main:create_app --factory --host 0.0.0.0 --port 8000
 ```bash
 uv run pytest
 ```
+
+## Deployment
+
+See `DEPLOYMENT.md` for the recommended remote GPU-host deployment, HTTPS exposure, and app-side configuration.
