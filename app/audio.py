@@ -19,6 +19,27 @@ ALLOWED_AUDIO_SUFFIXES = {".webm", ".wav", ".mp4", ".mpeg", ".mp3", ".m4a"}
 DEFAULT_UPLOAD_SUFFIX = ".bin"
 
 
+def _run_ffmpeg_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(command, check=False, capture_output=True, text=True)
+    except OSError as exc:
+        raise ServiceError(
+            "SERVICE_UNAVAILABLE",
+            "Audio normalization is unavailable on the server.",
+            503,
+        ) from exc
+
+
+def verify_ffmpeg_available(ffmpeg_binary: str) -> None:
+    result = _run_ffmpeg_command([ffmpeg_binary, "-version"])
+    if result.returncode != 0:
+        raise ServiceError(
+            "SERVICE_UNAVAILABLE",
+            "Audio normalization is unavailable on the server.",
+            503,
+        )
+
+
 def ensure_supported_upload(upload: UploadFile) -> str:
     content_type = (upload.content_type or "").lower()
     suffix = Path(upload.filename or "audio").suffix.lower()
@@ -81,14 +102,7 @@ def normalize_audio_file(
         str(output_path),
     ]
 
-    try:
-        result = subprocess.run(command, check=False, capture_output=True, text=True)
-    except FileNotFoundError as exc:
-        raise ServiceError(
-            "SERVICE_UNAVAILABLE",
-            "Audio normalization is unavailable on the server.",
-            503,
-        ) from exc
+    result = _run_ffmpeg_command(command)
 
     if result.returncode != 0:
         raise ServiceError(

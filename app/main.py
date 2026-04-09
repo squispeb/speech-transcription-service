@@ -60,14 +60,24 @@ def create_app(
     async def health_ready(
         runtime: TranscriptionRuntime = Depends(get_runtime),
     ) -> JSONResponse | HealthResponse:
+        ready = runtime.ready
+        detail = runtime.startup_error
+
+        if ready:
+            try:
+                audio_utils.verify_ffmpeg_available(resolved_settings.FFMPEG_BINARY)
+            except ServiceError as exc:
+                ready = False
+                detail = exc.message
+
         payload = HealthResponse(
-            ok=runtime.ready,
+            ok=ready,
             status="ready",
             model=runtime.model_name,
-            detail=runtime.startup_error,
+            detail=detail,
         )
 
-        if runtime.ready:
+        if ready:
             return payload
 
         return JSONResponse(status_code=503, content=payload.model_dump())
