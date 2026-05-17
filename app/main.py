@@ -37,12 +37,27 @@ def create_app(
         app.state.runtime = resolved_runtime
         await resolved_runtime.startup()
         yield
+        await resolved_runtime.shutdown()
 
     app = FastAPI(
         title="Pending App Transcription Service", version="0.1.0", lifespan=lifespan
     )
     app.state.settings = resolved_settings
     app.state.runtime = resolved_runtime
+
+    @app.middleware("http")
+    async def log_request(request: Request, call_next):
+        started = perf_counter()
+        response = await call_next(request)
+        logger.info(
+            "request_completed method=%s path=%s status_code=%s client_ip=%s duration_ms=%.2f",
+            request.method,
+            request.url.path,
+            response.status_code,
+            request.client.host if request.client else "unknown",
+            (perf_counter() - started) * 1000,
+        )
+        return response
 
     @app.exception_handler(ServiceError)
     async def handle_service_error(_: Request, exc: ServiceError) -> JSONResponse:

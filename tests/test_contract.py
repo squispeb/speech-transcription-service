@@ -1,6 +1,7 @@
-import wave
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
+import wave
 
 from fastapi.testclient import TestClient
 
@@ -8,7 +9,7 @@ from app import audio as audio_utils
 from app.config import Settings
 from app.errors import ServiceError
 from app.main import create_app
-from app.runtime import TranscriptResult
+from app.runtime import NeMoParakeetRuntime, TranscriptResult
 
 
 @dataclass
@@ -69,6 +70,52 @@ def test_rejects_missing_bearer_token() -> None:
 
     assert response.status_code == 401
     assert response.json()["code"] == "UNAUTHORIZED"
+
+
+def test_logs_request_timestamp(caplog) -> None:
+    client = make_test_client()
+
+    with caplog.at_level("INFO", logger="uvicorn.error"):
+        response = client.get("/health/live")
+
+    assert response.status_code == 200
+    assert "request_completed method=GET path=/health/live status_code=200" in caplog.text
+
+
+def test_settings_loads_from_environment(monkeypatch) -> None:
+    monkeypatch.setenv("TRANSCRIPTION_SERVICE_TOKEN", "env-token")
+    monkeypatch.setenv("MAX_UPLOAD_BYTES", "2048")
+
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    settings = get_settings()
+
+    assert settings.TRANSCRIPTION_SERVICE_TOKEN == "env-token"
+    assert settings.MAX_UPLOAD_BYTES == 2048
+
+
+def test_runtime_unloads_after_idle(monkeypatch) -> None:
+    settings = Settings(
+        TRANSCRIPTION_SERVICE_TOKEN="test-token",
+        TEMP_DIRECTORY=None,
+        MODEL_IDLE_UNLOAD_SECONDS=0.01,
+    )
+    runtime = NeMoParakeetRuntime(settings)
+
+    monkeypatch.setattr(runtime, "_load_model", lambda: None)
+    runtime._model = object()
+    runtime._langid_model = object()
+    runtime.ready = True
+
+    async def exercise() -> None:
+        await runtime._ensure_models_loaded()
+        runtime._mark_used()
+        runtime._schedule_idle_unload()
+        await asyncio.sleep(0.05)
+        assert runtime.ready is False
+
+    asyncio.run(exercise())
 
 
 def test_rejects_invalid_source(monkeypatch) -> None:

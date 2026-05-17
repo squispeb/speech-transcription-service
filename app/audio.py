@@ -1,5 +1,6 @@
 import shutil
 import subprocess
+from functools import lru_cache
 import wave
 from pathlib import Path
 
@@ -21,7 +22,7 @@ DEFAULT_UPLOAD_SUFFIX = ".bin"
 
 def _run_ffmpeg_command(command: list[str]) -> subprocess.CompletedProcess[str]:
     try:
-        return subprocess.run(command, check=False, capture_output=True, text=True)
+        return subprocess.run(command, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except OSError as exc:
         raise ServiceError(
             "SERVICE_UNAVAILABLE",
@@ -30,6 +31,7 @@ def _run_ffmpeg_command(command: list[str]) -> subprocess.CompletedProcess[str]:
         ) from exc
 
 
+@lru_cache(maxsize=1)
 def verify_ffmpeg_available(ffmpeg_binary: str) -> None:
     result = _run_ffmpeg_command([ffmpeg_binary, "-version"])
     if result.returncode != 0:

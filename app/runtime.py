@@ -1,5 +1,6 @@
 import asyncio
 from dataclasses import dataclass
+import gc
 import logging
 from pathlib import Path
 from time import perf_counter
@@ -34,6 +35,8 @@ class TranscriptionRuntime(Protocol):
 
     async def startup(self) -> None: ...
 
+    async def shutdown(self) -> None: ...
+
     async def transcribe(
         self, audio_path: Path, language_hint: str
     ) -> TranscriptResult: ...
@@ -44,6 +47,10 @@ class NeMoParakeetRuntime:
         self._settings = settings
         self._model: Any | None = None
         self._langid_model: Any | None = None
+        self._last_used_at: float | None = None
+        self._idle_unload_task: asyncio.Task[None] | None = None
+        self._load_lock = asyncio.Lock()
+        self._active_requests = 0
         self._semaphore = asyncio.Semaphore(1)
         self.model_name = settings.PARAKEET_MODEL_NAME
         self.ready = False
@@ -51,8 +58,7 @@ class NeMoParakeetRuntime:
 
     async def startup(self) -> None:
         try:
-            await asyncio.to_thread(self._load_model)
-            self.ready = True
+            await self._ensure_models_loaded()
             self.startup_error = None
             logger.info(
                 "transcription_runtime_ready asr_model=%s langid_model=%s device=%s",
@@ -65,16 +71,21 @@ class NeMoParakeetRuntime:
             self.startup_error = str(exc)
             logger.exception("transcription_runtime_startup_failed")
 
+    async def shutdown(self) -> None:
+        if self._idle_unload_task is not None:
+            self._idle_unload_task.cancel()
+            self._idle_unload_task = None
+
+        await self._unload_models()
+
     async def transcribe(
         self, audio_path: Path, language_hint: str
     ) -> TranscriptResult:
-        if not self.ready or self._model is None or self._langid_model is None:
-            raise ServiceError(
-                "SERVICE_UNAVAILABLE", "Transcription model is not ready.", 503
-            )
+        await self._ensure_models_loaded()
 
         async with self._semaphore:
             try:
+                self._active_requests += 1
                 return await asyncio.wait_for(
                     asyncio.to_thread(self._transcribe_sync, audio_path, language_hint),
                     timeout=self._settings.TRANSCRIPTION_TIMEOUT_SECONDS,
@@ -85,6 +96,72 @@ class NeMoParakeetRuntime:
                     "Transcription service timed out while processing the audio.",
                     503,
                 ) from exc
+            finally:
+                self._active_requests -= 1
+                self._mark_used()
+                self._schedule_idle_unload()
+
+    async def _ensure_models_loaded(self) -> None:
+        if self._model is not None and self._langid_model is not None:
+            self.ready = True
+            self._mark_used()
+            return
+
+        async with self._load_lock:
+            if self._model is None or self._langid_model is None:
+                await asyncio.to_thread(self._load_model)
+                self.ready = True
+                self.startup_error = None
+
+        self._mark_used()
+        self._schedule_idle_unload()
+
+    def _mark_used(self) -> None:
+        self._last_used_at = asyncio.get_running_loop().time()
+
+    def _schedule_idle_unload(self) -> None:
+        if self._idle_unload_task is not None:
+            self._idle_unload_task.cancel()
+
+        self._idle_unload_task = asyncio.create_task(self._idle_unload_worker())
+
+    async def _idle_unload_worker(self) -> None:
+        try:
+            while True:
+                last_used_at = self._last_used_at
+                if last_used_at is None:
+                    return
+
+                deadline = last_used_at + self._settings.MODEL_IDLE_UNLOAD_SECONDS
+                wait_seconds = deadline - asyncio.get_running_loop().time()
+                if wait_seconds > 0:
+                    await asyncio.sleep(wait_seconds)
+
+                if self._last_used_at == last_used_at and self._active_requests == 0:
+                    await self._unload_models()
+                    return
+        except asyncio.CancelledError:
+            return
+
+    async def _unload_models(self) -> None:
+        async with self._load_lock:
+            if self._model is None and self._langid_model is None:
+                return
+
+            self._model = None
+            self._langid_model = None
+            self.ready = False
+            gc.collect()
+
+            try:
+                import torch
+
+                if self._settings.MODEL_DEVICE != "cpu" and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+
+            logger.info("transcription_runtime_unloaded_after_idle seconds=%.2f", self._settings.MODEL_IDLE_UNLOAD_SECONDS)
 
     def _load_model(self) -> None:
         try:
